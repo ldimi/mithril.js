@@ -58,10 +58,13 @@ var m = (function app(window, undefined) {
 		}
 		
 		for (var attrName in attrs) {
-			if (attrName === classAttrName && attrs[attrName] != null && attrs[attrName] !== "") {
-				classes.push(attrs[attrName])
+			if (attrs.hasOwnProperty(attrName)) {
+				if (attrName === classAttrName && attrs[attrName] != null && attrs[attrName] !== "") {
+					classes.push(attrs[attrName])
+					cell.attrs[attrName] = "" //create key in correct iteration order
+				}
+				else cell.attrs[attrName] = attrs[attrName]
 			}
-			else cell.attrs[attrName] = attrs[attrName]
 		}
 		if (classes.length > 0) cell.attrs[classAttrName] = classes.join(" ");
 		
@@ -129,7 +132,7 @@ var m = (function app(window, undefined) {
 			//3) if key exists in new list, change action from deletion to a move
 			//4) for each key, handle its corresponding action as marked in previous steps
 			var DELETION = 1, INSERTION = 2 , MOVE = 3;
-			var existing = {}, unkeyed = [], shouldMaintainIdentities = false;
+			var existing = {}, shouldMaintainIdentities = false;
 			for (var i = 0; i < cached.length; i++) {
 				if (cached[i] && cached[i].attrs && cached[i].attrs.key != null) {
 					shouldMaintainIdentities = true;
@@ -238,10 +241,10 @@ var m = (function app(window, undefined) {
 			var controllerConstructors = [], controllers = []
 			while (data.view) {
 				var controllerConstructor = (data.controller || {}).$original || data.controller || function() {}
-				var controllerIndex = cached.controllerConstructors ? cached.controllerConstructors.indexOf(controllerConstructor) : -1
+				var controllerIndex = m.redraw.strategy() == "diff" && cached.controllerConstructors ? cached.controllerConstructors.indexOf(controllerConstructor) : -1
 				var controller = controllerIndex > -1 ? cached.controllers[controllerIndex] : new (data.controller || function() {})
 				var key = data && data.attrs && data.attrs.key
-				data = pendingRequests == 0 ? data.view(controller) : {tag: "placeholder"}
+				data = pendingRequests == 0 || cached ? data.view(controller) : {tag: "placeholder"}
 				if (key) {
 					if (!data.attrs) data.attrs = {}
 					data.attrs.key = key
@@ -257,7 +260,7 @@ var m = (function app(window, undefined) {
 			var dataAttrKeys = Object.keys(data.attrs)
 			var hasKeys = dataAttrKeys.length > ("key" in data.attrs ? 1 : 0)
 			//if an element is different enough from the one in cache, recreate it
-			if (data.tag != cached.tag || dataAttrKeys.join() != Object.keys(cached.attrs).join() || data.attrs.id != cached.attrs.id || data.attrs.key != cached.attrs.key || (m.redraw.strategy() == "all" && cached.configContext && cached.configContext.retain !== true) || (m.redraw.strategy() == "diff" && cached.configContext && cached.configContext.retain === false)) {
+			if (data.tag != cached.tag || dataAttrKeys.sort().join() != Object.keys(cached.attrs).sort().join() || data.attrs.id != cached.attrs.id || data.attrs.key != cached.attrs.key || (m.redraw.strategy() == "all" && cached.configContext && cached.configContext.retain !== true) || (m.redraw.strategy() == "diff" && cached.configContext && cached.configContext.retain === false)) {
 				if (cached.nodes.length) clear(cached.nodes);
 				if (cached.configContext && typeof cached.configContext.onunload === FUNCTION) cached.configContext.onunload()
 				if (cached.controllers) {
@@ -300,7 +303,7 @@ var m = (function app(window, undefined) {
 				
 				if (cached.children && !cached.children.nodes) cached.children.nodes = [];
 				//edge case: setting value on <select> doesn't work before children exist, so set it again after children have been created
-				if (data.tag === "select" && data.attrs.value) setAttributes(node, data.tag, {value: data.attrs.value}, {}, namespace);
+				if (data.tag === "select" && "value" in data.attrs) setAttributes(node, data.tag, {value: data.attrs.value}, {}, namespace);
 				parentElement.insertBefore(node, parentElement.childNodes[index] || null)
 			}
 			else {
@@ -316,7 +319,7 @@ var m = (function app(window, undefined) {
 			}
 			//schedule configs to be called. They are called after `build` finishes running
 			if (typeof data.attrs["config"] === FUNCTION) {
-				var context = cached.configContext = cached.configContext || {retain: (m.redraw.strategy() == "diff") || undefined};
+				var context = cached.configContext = cached.configContext || {};
 
 				// bind
 				var callback = function(data, args) {
@@ -542,7 +545,7 @@ var m = (function app(window, undefined) {
 		return gettersetter(store)
 	};
 
-	var roots = [], components = [], controllers = [], lastRedrawId = null, lastRedrawCallTime = 0, computePostRedrawHook = null, prevented = false, topComponent, unloaders = [];
+	var roots = [], components = [], controllers = [], lastRedrawId = null, lastRedrawCallTime = 0, computePreRedrawHook = null, computePostRedrawHook = null, prevented = false, topComponent, unloaders = [];
 	var FRAME_BUDGET = 16; //60 frames per second = 1 call per 16 ms
 	function parameterize(component, args) {
 		var controller = function() {
@@ -568,7 +571,7 @@ var m = (function app(window, undefined) {
 		var isPrevented = false;
 		var event = {preventDefault: function() {isPrevented = true}};
 		for (var i = 0, unloader; unloader = unloaders[i]; i++) {
-			unloader.handler(event)
+			unloader.handler.call(unloader.controller, event)
 			unloader.controller.onunload = null
 		}
 		if (isPrevented) {
@@ -597,6 +600,7 @@ var m = (function app(window, undefined) {
 			endFirstComputation();
 			return controllers[index]
 		}
+		else computePreRedrawHook = computePostRedrawHook = null
 	};
 	var redrawing = false
 	m.redraw = function(force) {
@@ -619,12 +623,15 @@ var m = (function app(window, undefined) {
 		redrawing = false
 	};
 	m.redraw.strategy = m.prop();
-	var blank = function() {return ""}
 	function redraw() {
+		if (computePreRedrawHook) {
+			computePreRedrawHook()
+			computePreRedrawHook = null
+		}
 		for (var i = 0, root; root = roots[i]; i++) {
 			if (controllers[i]) {
 				var args = components[i].controller && components[i].controller.$$args ? [controllers[i]].concat(components[i].controller.$$args) : [controllers[i]]
-				m.render(root, components[i].view ? components[i].view(controllers[i], args) : blank())
+				m.render(root, components[i].view ? components[i].view(controllers[i], args) : "")
 			}
 		}
 		//after rendering within a routed context, we need to scroll back to the top, and fetch the document title for history.pushState
@@ -682,7 +689,7 @@ var m = (function app(window, undefined) {
 					redirect(path)
 				}
 			};
-			computePostRedrawHook = setScroll;
+			computePreRedrawHook = setScroll;
 			window[listener]()
 		}
 		//config: m.route
@@ -715,9 +722,9 @@ var m = (function app(window, undefined) {
 			var shouldReplaceHistoryEntry = (arguments.length === 3 ? arguments[2] : arguments[1]) === true || oldRoute === arguments[0];
 
 			if (window.history.pushState) {
+				computePreRedrawHook = setScroll
 				computePostRedrawHook = function() {
 					window.history[shouldReplaceHistoryEntry ? "replaceState" : "pushState"](null, $document.title, modes[m.route.mode] + currentRoute);
-					setScroll()
 				};
 				redirect(modes[m.route.mode] + currentRoute)
 			}
@@ -1102,6 +1109,7 @@ var m = (function app(window, undefined) {
 		var extract = xhrOptions.extract || function(xhr) {
 			return xhr.responseText.length === 0 && deserialize === JSON.parse ? null : xhr.responseText
 		};
+		xhrOptions.method = (xhrOptions.method || 'GET').toUpperCase();
 		xhrOptions.url = parameterizeUrl(xhrOptions.url, xhrOptions.data);
 		xhrOptions = bindData(xhrOptions, xhrOptions.data, serialize);
 		xhrOptions.onload = xhrOptions.onerror = function(e) {
@@ -1139,5 +1147,5 @@ var m = (function app(window, undefined) {
 	return m
 })(typeof window != "undefined" ? window : {});
 
-if (typeof component != "undefined" && component !== null && component.exports) component.exports = m;
+if (typeof module != "undefined" && module !== null && module.exports) module.exports = m;
 else if (typeof define === "function" && define.amd) define(function() {return m});
